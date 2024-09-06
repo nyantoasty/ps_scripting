@@ -32,7 +32,7 @@ if(!(get-installedmodule -name '7zip4powershell' -ea ignore)){
 }
 #Variables ===================================================================================================================
 
-$printerInfo = @{
+$script:printerInfo = @{
     "COMM110C-1" = "https://ipp.shsu.edu/printers/COMM110C-1"
     "COM408-2" = "https://ipp.shsu.edu/printers/COM408-2"
 } #printer name + address
