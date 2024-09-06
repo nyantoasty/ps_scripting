@@ -36,8 +36,8 @@ $script:printerInfo = @{
     "COMM110C-1" = "https://ipp.shsu.edu/printers/COMM110C-1"
     "COM408-2" = "https://ipp.shsu.edu/printers/COM408-2"
 } #printer name + address
-
-$script:printerFolder = "C:\PrinterInstalls\" #where to save .inf and reinstall script
+$script:folderName = "PrinterInstalls"
+$script:printerFolder = "C:\" + "$script:foldername" + "\" #where to save .inf and reinstall script
 $script:printerINF = "CNLB0MA64.inf" #current .inf file obtained from running driver installer (Canon UFR Plus Driver, located in Drivers folder after install)
 
 $script:url = "https://downloads.canon.com/bicg2024/drivers/Generic_Plus_UFRII_v3.00_Set-up.exe"
@@ -56,7 +56,8 @@ function add-COMPrinters {
     $res = $check | where-object Name -like $dname
 
     if($res -eq $null) {
-        
+    
+        New-Item -path "C:\" -Name $script:foldername -itemtype "directory"
         $clnt = new-object system.net.webclient
         $file = $script:printerfolder + "driver.exe"
         $dest = $script:printerfolder
