@@ -58,14 +58,14 @@ function add-COMPrinters {
     if($res -eq $null) {
         
         $clnt = new-object system.net.webclient
-        $file = "C:\PrinterInstalls\driver.exe"
-        $dest = $script:printerfolder + "Drivers\"
+        $file = $script:printerfolder + "driver.exe"
+        $dest = $script:printerfolder
 
-        $clnt.downloadfile($url,$file)
+        $clnt.downloadfile($script:url,$file)
 
         expand-7zip -archiveFilename $file -TargetPath $dest
 
-        $path = "C:\PrinterInstalls\drivers\x64\"
+        $path = $script:printerfolder + "x64\Driver\"
         $path = $path + $printerINF
 
         Invoke-Command {C:\Windows\System32\pnputil.exe -a $path } -erroraction silentlycontinue
