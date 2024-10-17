@@ -1,0 +1,798 @@
+#Modules ===================================================================================================================
+if(!(get-installedmodule -name 'PSWRiteColor' -EA ignore)) {
+    set-psrepository -name psgallery -InstallationPolicy Trusted
+    install-module -name pswritecolor
+    import-module -name pswritecolor 
+}
+if(!(get-installedmodule -name 'ImportExcel' -EA ignore)) {
+    set-psrepository -name psgallery -InstallationPolicy Trusted
+    install-module -name importexcel
+    import-module -name importexcel
+}
+<#if(!(get-installedmodule -name 'dellbiosprovider' -ea ignore)){
+      set-psrepository -name psgallery -installationpolicy trusted
+      install-module -name dellbiosprovider
+      import-module -name dellbiosprovider
+}#>
+
+#Hashtables ===================================================================================================================
+
+#Parameters ===================================================================================================================
+
+$adfixflag = $null # indicates the listed hostname was corrected (ie 146828 to D146828)
+$Append = $null # indicator for appending to veyon csv
+$Appended = $null # indicator that Append function has been used
+$appendResults = @()
+$addesc = $null # stores description from AD
+$adDescFlag = $null # indicator for pulling info from AD description for Veyon
+$authflag = $null # indicator for winrm failing due to authentication
+$checkADFlag = $null # indicates Task is only checking AD, not computers
+$Checkpath = $null # variable to hold file loc information
+$ChkChoice = $null # Whether to Overwrite/Rename/Append
+$cmdLine = $null # scriptblock for invoke-command
+$Confirm = $null # user confirmation
+$ConfirmWrite = $null # indicates that user wants to write looped single node results to csv
+$connflag = $null # indicator for winrm being configured
+$Continue = $null # Repeat Task
+$Count = $null # counter
+$Directory = 'C:\Transcripts\' # File path to save logs/transcripts
+$Err = $null #stores error message
+$Filename = $null # Generated name of Transcript
+$Hostfile = $null # List of node names
+$inadflag = $null # shows if $host name was found in AD
+$lastlogon = $null # stores last logon date (from AD)
+$Length = $null # gets count of how many names are in a csv or array
+$Logging = $null # Whether or not to enable logging
+$Mode = $null # [1] Looping single nodes or [2]against host file
+$Node = $null # Computer Name
+$NodeList = @() # Multiple Computer Names
+$nsforward = $null # holds information for nslookup
+$Obj = @() # Working ps object; added to $Results
+$oldname = $null # originally listed host name from hostfile
+$psver = $null #checks the version of powershell
+$Report = $null # Location or specific title
+$Res = @() # Another working ps object
+$Results = @() # Final array of all $Obj after loop
+$Room = $null # Location information required by generate-csv
+$Script = $null # path to the script for invoke-script
+$status = $null #stores status message
+$Task = $null # Which main  function the user wants
+$tcflag = $null # stores results from test-connection
+$Test = $null
+$tmpname = $null # stores the name pulled from AD to compare with the original search string
+$updateTime = $null # allows the user to replace Location/Room variable with the date and time. Useful for when rerunning the same task against the same hostfile when Appending
+$updateTimeFlag = $null # Indicator for if updateTime will be used for $room
+$wsman = $null #checks if winrm is running
+$wsmanauth = $null # stores results from checking winrm authentication
+$wsmanconnect = $null # stores results from checking winrm
+
+$script:GetBIOS = @() # stores results from Get-BIOS
+$script:mismatch = @()
+$script:validation = [System.Collections.ArrayList]@()
+$script:failFlag = $false
+
+
+#Functions ====================================================================================================================
+
+function get-filename {
+  Write-Color "Would you like to save your output to ","${Directory}" -Color Yellow,Green
+  $Confirm = Read-Host -Prompt '[Y]es or any key for No'
+  Write-Color "${Confirm}" -Color Cyan
+  if(!($Confirm -eq 'Y')) {
+    $Directory = Read-Host -Prompt "Where would you like to save your output?"
+    Write-Color "${Directory}" -Color Cyan
+  }
+  $repChar = '_'
+  $tmpName = Read-Host -Prompt 'Please enter report title; note that spaces will be replaced by undescores'
+  $script:Report = $tmpName -replace ' ', $repChar
+  $tmpName = Read-Host -Prompt 'Please enter a task or query name; note that spaces will be replaced by undescores (ex: Get Stats becomes Get_Stats)'
+  $TaskName = $tmpname -replace ' ', $repChar
+  $TaskName = $TaskName -replace ':',''
+
+  
+  $script:CheckPath = "${Directory}${Report}_${TaskName}.xlsx"
+      
+  write-host "$script:checkpath"
+      
+
+  if(test-path $script:Checkpath) {
+
+    Write-Color "A file already exists by this name. Would you like to ","[O]","verwrite or ","[A]","ppend to the old file, or have the script automatically ","[R]","ename the new file?" -Color Yellow,Red,Yellow,Blue,Yellow,Green,Yellow
+    $ChkChoice = Read-Host -prompt "[O]verwrite, [A]ppend, Automatically [R]ename, or any other key to cancel and end the script"
+
+    switch($script:chkchoice) {
+      'O' {
+            remove-item -path $script:checkpath -force
+      }
+      'A' {
+            write-host "The script will attempt to append to the existing file. If there are errors, please retry and either select [O]verwrite or [R]ename"
+      }
+      'R' {
+            $script:CheckPath = "${Directory}\New_${Report}_${TaskName}.xlsx"
+            write-host "$script:checkpath"
+      }
+    }
+  }
+     
+  Write-Color -foregroundcolor Green "Report will be saved as ${Report}_${Task}.xlsx in directory ${Directory}"  
+  return $script:checkpath
+}
+
+function write-excel {
+    $tmpmismatch = $script:mismatch | select-object computer,setting,current,desired,status
+  
+  $script:xlpkg = $script:trash      | export-excel -path $script:checkpath -worksheetname 'TRASH'             -tablename 'T_T'                -autosize -passthru 
+  $script:xlpkg = $tmpmismatch       | export-excel -excelpackage $xlpkg    -worksheetname 'Misconfigurations' -tablename 'Misconfigurations'  -autosize -passthru
+  $script:xlpkg = $script:validation | export-excel -excelpackage $xlpkg    -worksheetname 'Updated_Settings'  -tablename 'Updated_Settings'   -autosize -passthru 
+  $script:xlpkg = $script:GetBIOS    | export-excel -excelpackage $xlpkg    -worksheetname 'Current_Settings'  -tablename 'GetBIOS'            -autosize -passthru -MoveToStart
+  
+
+  $script:xlpkg.workbook.worksheets.delete('TRASH')
+  
+  set-excelrange -worksheet $script:xlpkg.Current_Settings -range "f:f" -wraptext
+
+  close-excelpackage $script:xlpkg
+}
+
+function Get-Hostfile {
+    $check = $false
+    $current = pwd
+    $script:nodelist = @()
+
+    do {
+
+      Write-color "Current directory is ","$current" -color green,blue        
+        
+      $script:Hostfile  = Read-Host -Prompt "Please enter your hostfile"
+      
+
+      if(test-path $script:Hostfile) {
+            $script:Length = (get-content $script:Hostfile).length
+            Write-Color "${script:Hostfile} has ${script:Length} objects." -Color Cyan
+            $preview = gc $script:Hostfile -first 5
+            Write-Color "`nPreview of first five lines: `n"
+
+            foreach ($i in $preview) {
+                write-host($i)
+            }
+
+            $confirm = read-host -prompt "`nDoes this look like the correct file? [Y]es or any key for No"
+
+            if($confirm -eq 'Y') {
+                $check = $true
+            }
+
+            else {
+                $check = $false
+            }
+      }
+
+        else {
+            
+            Write-Color "${script:Hostfile}"," not found" -color red,yellow
+            Write-color "Current directory is ","$current" -color yellow,red
+            Write-Color "You may need to write the full file path. (ex: ","C:\Reports\Classroom.txt",", Do not include single or double quotes.)" -color yellow,blue,yellow
+            $check = $false
+        }
+    } While ($check -eq $false)
+    $script:info = gc $script:Hostfile
+    foreach($i in $script:info) {
+      $script:nodelist  += $i
+    }
+    $script:Length = (get-content $script:Hostfile).length
+}
+
+function Start-Log {
+
+    $Username   = $env:USERNAME
+    $Hostname   = hostname
+    $Datetime   = get-date -Format "HHmm_MM.dd.yy"
+    $Fname   = "Transcript_${script:Report}_${script:Task}_[${Username}]-[${Hostname}]-[${Datetime}].txt"
+    $LPathName = Join-Path -Path "$script:Directory" -ChildPath "$Fname"
+
+    Write-Color "Checking intended filename and path: ","${LPathname}" -Color green,Blue
+
+    if(Test-Path $LPathName) {
+
+        Write-Color "A transcript already exists with this name. Appending to existing transcript."
+        Start-Transcript -LiteralPath ("$LPathName") -Append
+    }
+ 
+    Start-Transcript -LiteralPath ("$LPathName") -NoClobber
+}
+
+function Stop-Log {
+
+    Stop-Transcript
+}
+
+function Skip-Bad {
+
+    param ( [string]$bad)
+    if($script:Err -ne $null) {
+
+        $status = $script:Err
+    }
+    else {
+        $status = "Unable to connect"
+    }
+
+    switch ($script:Task) {
+
+        'Get-BIOS' {
+            $script:res = [pscustomobject]@{
+                  Room = $script:room
+                  Computer = $bad
+                  OT = ''
+                  Query = 'Get-BIOS'
+                  Settings = ''
+                  Attention= ''
+                  Serial = ''
+                  Status = $status
+            }
+        }
+    }
+}
+
+function Get-Mode {
+      
+      $First = 0
+
+      do {
+
+            if($First -ne 0) {
+                Write-Color "You must enter ","'1'"," or ","'2'",", please try again." -Color Yellow,Red,Yellow,Red,Yellow
+            }
+
+            $script:Mode = Read-Host -Prompt '[1] Loop Single Nodes or [2] use a host file'
+
+            if($script:Mode -eq 1) {
+                Write-Color "You have chosen"," [1] ",", loop single nodes." -color Green, Yellow, Green
+            }
+            else {
+                Write-Color "You have chosen"," [2] ",", to use a host file." -color Green,Yellow,Green
+            }
+            $First++
+
+      } While (!($script:Mode -in ('1','2')))
+    
+    if($script:Mode -eq 2) {
+        $script:ConfirmWrite = 'Y'
+        Get-hostfile
+    }
+}
+
+function Check-AD {
+    param ([string]$comp)
+
+    $script:ADFixFlag = $false
+    $script:inADFlag = $null
+    $script:LastLogon = $null
+    $script:tmpName = $null
+    $script:OldName = $null
+    $numeric = ($comp -match "^[\d\.]+$")
+
+
+    #if $comp is numeric (OT) add wildcards to searchstr
+    if($numeric -eq $true) {
+        $searchstr = -join("*",$comp,"*")
+    }
+    else {
+        $searchstr = $comp
+    }
+
+    #filter search AD for names that contain $comp
+    $script:inAD = get-adcomputer -filter {name -like $searchstr} -properties *
+
+    if($script:inAD -ne $null) {
+        $script:tmpName = $script:inAD.Name
+        $script:LastLogon = $script:inAD.lastlogondate
+        $script:inADFlag = $true
+        $script:ados = $script:inAD.OperatingSystem
+        $script:ou   = ($script:inAD.distinguishedName).split(',')[-6].split('=')[1]
+        $script:adDesc = $script:inAD.description
+
+        if($script:ou -eq $comp) {
+
+                $script:ou = ($script:inAD.distinguishedName).split(',')[-5].split('=')[1]
+            }
+
+            if(!($script:ados -like '*Windows*')) {
+                $script:ados = "Non-PC"
+                $script:Err += "Non-PC"
+            }
+
+            #if found in AD, check if $comp and AD name are the same
+            if($script:tmpName -ne $comp) {
+                #only set fix flag to true if searchstr was for OT
+                if ($numeric -eq $true) { 
+                    $script:OldName = $script:Node
+                    $script:Node = $script:tmpName
+                    $script:ADFixFlag = $true
+                }
+            }
+        }
+
+    else {
+        $script:inADFlag = $false
+    }
+
+    return $script:inADFlag
+}
+
+function Check-WinRM {
+    param ([string]$comp)
+    $script:ConnFlag = $null
+    $script:AuthFlag = $null
+
+    $script:wsmanConnect = test-wsman -computer $comp -erroraction silentlycontinue
+    if($script:wsmanConnect -ne $null) {
+        $script:ConnFlag = $true
+        $script:WsmanAuth = test-wsman -computer $comp -authentication default -erroraction silentlycontinue
+        if($script:WsmanAuth -ne $null) {
+            $script:AuthFlag = $true
+        }
+        else {
+            
+            $script:AuthFlag = $false
+        }
+    }
+    else {
+        
+        $script:ConnFlag = $false
+    }
+    return $script:AuthFlag
+}
+
+function Check-Connection {
+    $script:tcFlag = $null
+    $script:Continue = $null
+
+
+      function invoke-commandandstoreresults {
+            $script:cmdLine = -join ($script:Task, " -comp ", $script:Node)
+            Invoke-Expression $script:cmdLine | Tee-Object -Variable temp | Select-Object * | Write-Output
+            $script:Res = $temp
+            $script:Results += $script:Res
+            $script:Results | Out-Null
+      }
+
+      function Handle-WinRM {
+        $w_check = Check-Winrm -comp $script:Node
+        if ($w_check) {
+            Write-Color "`tWinRM Configured ","Correctly." -Color Blue, Green
+            Invoke-CommandAndStoreResults
+        } else {
+            if ($script:ConnFlag -eq $true) {
+                Write-Color "`tWinRM Authentication ","Failed." -Color Blue, Red
+                $script:Err += " WinRM Auth Failure."
+            } else {
+                Write-Color "`tWinRM Connection ","Failed." -Color Blue, Red
+                $script:Err += " Unable to connect to WinRM."
+            }
+            if($script:checkADFlag) {
+                Write-Color "`tContinuing AD query." -color fyellow
+                Invoke-CommandAndStoreResults
+            }
+            else {
+                Skip-Bad -bad $script:Node
+            }
+        }
+    }
+    function Handle-Offline {
+
+        if ($script:LastLogon -ne $null) {
+            $script:Err += " Offline. Last Logon: ${script:LastLogon}"
+            Write-Color "`tOffline."," Last Logon: ","${script:LastLogon}" -Color Red, Yellow, Red
+        } 
+        else {
+            $script:Err += " Offline. Last Logon unknown."
+            Write-Color "`tOffline. Last Logon unknown." -Color Red
+        }
+        if ($script:checkadflag -eq $true) {
+            Write-Color "`tContinuing AD query." -color yellow
+            Invoke-CommandAndStoreResults
+        } 
+        else {
+            $script:badNodes += $bad
+            Skip-Bad -bad $script:Node
+        }
+    }
+    function Handle-NotInAD {
+        if ($script:ados -eq 'Non-PC') {
+            Write-Color "`t${script.Node} ","may be a Mac; unable to process script commands." -Color Red, Yellow
+            Invoke-CommandAndStoreResults
+        } else {
+            Write-Color "`t${script:Node} not found in AD." -Color Red
+            $script:Err = "Not in AD."
+            Skip-Bad -bad $script:Node
+        }
+    }
+    function Handle-ADCheckSuccess {
+        if ($script:ADFixFlag -eq $true) {
+            Write-Color "`tMismatch between"," ${script:OldName} ","and ","${script:tmpName}" -Color Yellow, Red, Yellow, Green
+            Write-Color "`tAdjusting search name to ","${script:tmpName}" -Color Yellow, Green
+            $script:Err = "Name Corrected."
+        }
+        $tc_check = Test-Connection -ComputerName $script:Node -Quiet -ErrorAction SilentlyContinue
+        
+        if ($tc_check) {
+            $script:tcFlag = $true
+            Write-Color "`tTest Connection ","Successful." -Color Blue, Green
+            if ($script:ados -ne 'Non-PC') {
+                Handle-WinRM
+
+            } 
+            else {
+                
+                if ($script:checkadflag -eq $true) {
+                    Write-Color "`t${script.Node}"," is Non-PC, but AD query can continue." -Color yellow, blue
+                    Invoke-CommandAndStoreResults
+                } else {
+                    Write-Color "`t${script.Node}"," is Non-PC; cannot interpret script commands." -color red, yellow
+                    Skip-Bad -bad $script:Node
+                }
+            }
+        } else {
+            Handle-Offline
+        }
+    }
+    function Set-Room {
+        $script:updateTime = get-date -format "MM.dd_hh:mm"
+        Write-Color "Auto Timestamp value is currently ","${script:updateTime}" -color blue,cyan
+        do {
+            Write-color "Would you like to use the ","[T]","imestamp ","(${script:UpdateTime})"," or enter a ","[C]","ustom Location?" -color blue,cyan,blue,cyan,blue,magenta,green
+            $script:Choice = read-host -prompt "[T]imestamp or [C]ustom Location"
+            }while(($script:Choice -ne 'T') -and ($script:Choice -ne 'C'))
+            if($script:choice -eq 'C') {
+                $script:Room = Read-Host -Prompt "Please enter Location"
+            }
+            else {
+                $script:room = $script:updateTime
+            }
+    }
+
+    # main logic
+
+    if ($script:Mode -eq 1) {
+        $script:First = 0
+        Set-Room
+        
+        do {
+            $script:Err = $null
+            if (!($script:Continue -eq 'S') -and !($script:Continue -eq 'D') -and !($script:Continue -eq 'A') -and !($script:Continue -eq 'X') -and ($script:First -gt 0)) {
+                Write-Color "You must enter ","[D]","isplay, ","[A]","dd, ","[C]","hange Room ", "[X] Clear Results","or ","[S]","top!" -Color Red, Yellow, Red, Yellow, Red, Yellow, Red, Yellow, Red,yellow,red
+            } 
+            else {
+                $script:NodeList = @()
+                Write-Color "You may enter a ","single node"," [ex: D123456]"," or a ","list of nodes separated by commas ","[ex: 123456,D145345]","`nDo not use spaces after your commas." -color blue,green,cyan,blue,green,cyan,yellow
+                $searchstr = Read-Host -Prompt 'Please enter your search string'
+                $script:Nodelist +=($searchstr.split(','))
+
+                Write-Color "You entered the following: " -color green
+                foreach($script:node in $script:nodelist) {
+                    write-color "${script:node}" -color cyan
+                }
+                foreach($script:Node in $script:NodeList) {
+                    Write-Color "Working on ","${script:Node}" -Color Yellow, Green   
+                    $ad_check = Check-AD -comp $script:Node
+                    if ($ad_check -eq $true) {
+                        Handle-ADCheckSuccess
+                    } else {
+                        Handle-NotInAD
+                    }
+                }
+            }
+            $script:Continue = Read-Host -Prompt "[D]isplay Results, [A]dd new node, [C]hange Room, [X] Clear Results, [S]top"
+            if ($script:Continue -eq 'D') {
+                  do { 
+                       $script:validation | out-gridview -title 'Validation'
+
+                      Write-Color "Displaying results" -Color Cyan
+                      Write-COlor "Results will appear in another window; closing the window will not affect this session." -color blue
+                      
+                      $script:Continue = Read-Host -Prompt "[D]isplay Results, [A]dd new node, [C]hange Room, [X] Clear Results, [S]top"
+                  }while($script:continue -eq 'D')
+            }
+
+            if ($script:continue -eq 'X') {
+                  $script:GetBIOS = @()
+                  $script:Validation = [System.Collections.ArrayList]@()
+                  $script:mismatch = @()
+                
+                  $roomswitch = read-host -prompt "Would you like to change rooms? [Y]es or any key for no"
+                  if($roomswitch -eq 'Y') {
+                        set-room
+                  }
+                  $script:Continue = Read-Host -Prompt "[D]isplay Results, [A]dd new node, [C]hange Room, [X] Clear Results, [S]top"
+            }
+            if ($script:Continue -eq 'C') {
+                set-room
+                $script:Continue = Read-Host -Prompt "[D]isplay Results, [A]dd new node, [C]hange Room, [X] Clear Results, [S]top"
+            }
+            $script:First++
+        } while ($script:Continue -ne 'S')
+    } 
+    else {
+        $script:Count = 1
+        Set-Room
+        foreach ($script:Node in $script:NodeList) {
+            $script:Err = $null
+            Write-Color "Working on ","${script:Node}"," - ","${script:Count}"," out of ","${script:Length}" -Color Blue, Green, Blue, Yellow, Blue, Yellow   
+            $ad_check = Check-AD -comp $script:Node
+            if ($ad_check -eq $true) {
+                Handle-ADCheckSuccess
+            } else {
+                Handle-NotInAD
+            }
+            $script:Count++
+        }
+    }
+}
+
+function Get-BIOS {
+      param([string]$comp)
+      $script:task = 'Get-BIOS'
+
+      $script:session = new-pssession $comp
+      $type = invoke-command -session $session -scriptblock {get-computerinfo} | select cschassisskunumber
+
+      #NOTE: These configurations are based off of current documentation; please contact k.ainsworth@shsu.edu if there are any mistakes
+
+      if($type.cschassisskunumber -like "Desktop"){
+
+            $SettingsCat = ("SecureBoot\SecureBootMode",
+                  "SecureBoot\SecureBoot",
+                  "Security\PasswordLock",
+                  "Security\IsAdminPasswordSet",
+                  "TPMSecurity\TPMActivation",
+                  "TPMSecurity\TPMSecurity",
+                  "PowerManagement\AutoOn",
+                  "PowerManagement\AutoOnHr",
+                  "PowerManagement\AutoOnMn",
+                  "PowerManagement\ACPwrRcvry",
+                  "SystemConfiguration\EmbNic1",
+                  "SystemConfiguration\UefiNwStack",
+                  "SystemConfiguration\EmbSataRaid"
+                  )
+
+            $DesiredSettings = @{SecureBootMode='DeployedMode';
+                  SecureBoot='Enabled';
+                  PasswordLock='Disabled';
+                  IsAdminPasswordSet='True';
+                  TPMActivation='Enabled';
+                  TPMSecurity='Enabled';
+                  AutoOn='Everyday';
+                  AutoOnHr='23';
+                  AutoOnMn='0';
+                  ACPwrRcvry='On';
+                  EmbNic1='EnabledPxe';
+                  UefiNwStack='Enabled';
+                  EmbSataRaid='Ahci'
+              }
+      }
+
+      else {
+
+            $SettingsCat =("SecureBoot\SecureBootMode",
+                  "SecureBoot\Secureboot",
+                  "Security\PasswordLock",
+                  "Security\IsAdminPasswordSet",
+                  "TPMSecurity\TpmSecurity",
+                  "SystemConfiguration\EmbNic1",
+                  "SystemConfiguration\UefiNwStack",
+                  "SystemConfiguration\EmbSataRaid"
+                  )
+
+            $DesiredSettings = @{SecureBootMode='DeployedMode';
+                  SecureBoot='Enabled';
+                  PasswordLock='Disabled';
+                  IsAdminPasswordSet='True';
+                  TPMSecurity='Enabled';
+                  EmbNic1='EnabledPxe';
+                  UefiNwStack='Enabled';
+                  EmbSataRaid='Ahci'
+                  }
+      }
+      $tmpBIOS = @()
+      
+      $localsettings = invoke-command -session $session -scriptblock {
+            if(!(get-installedmodule -name 'dellbiosprovider' -ea ignore)){
+                  set-psrepository -name psgallery -installationpolicy trusted
+                  install-module -name dellbiosprovider
+                  import-module -name dellbiosprovider
+            }
+            else {
+                  import-module -name dellbiosprovider
+            }
+            $script:current = @()
+            foreach($s in $using:settingscat) {
+                  $script:res = get-childitem -path "Dellsmbios:\$($s)" -ea ignore| select-object PSComputerName,Attribute,CurrentValue
+                  $script:current += $script:res
+            }
+
+            $script:current } | select-object pscomputername,attribute,currentvalue
+
+      $OT = (get-ciminstance -computername $comp win32_systemenclosure).smbiosassettag
+      $info = invoke-command -session $session -scriptblock {get-computerinfo | select-object 'BiosSeralNumber'}             
+      foreach($att in $localsettings) {
+            $script:res = [pscustomobject]@{
+                  Computer = $att.PSComputerName
+                  Setting = $att.attribute
+                  Current = $att.currentvalue
+                  Desired = $desiredsettings[$att.attribute]
+            }
+            $tmpBIOS += $script:res
+      }
+
+      
+      foreach($att in $tmpbios) {
+            if($att.current -ne $att.desired) {
+                  $script:res = [pscustomobject]@{
+                        Computer = $att.computer
+                        Setting = $att.setting
+                        Current = $att.current
+                        Desired = $att.desired
+                        Status = "Mismatch!"
+                  }
+                  $script:mismatch += $script:res
+            }
+      }
+
+      $tmpobj = new-object system.management.automation.psobject
+
+      foreach($f in $tmpbios) {
+            $check = "{0, -15} >> {1,15}" -f $f.current, $f.desired
+            $name = "{0,-20}" -f $f.setting
+            $tmpobj | add-member -membertype noteproperty -name $name -value $check | out-string > $null
+      }
+
+      $tag = $info.biosseralnumber
+      $check = $script:mismatch | where-object Computer -match $comp
+      if($check -eq $null) {
+
+        $script:res = [pscustomobject]@{
+            Room = $script:Room
+            Computer = $comp
+            OT = $ot
+            Query = 'Get-BIOS'
+            Settings = $tmpobj | select * | out-string
+            Attention = "No Misconfigurations found."
+            Serial = $tag
+            Status = "Verified!"
+        }
+      }
+      else{
+        $tmpMatch = $script:mismatch | where-object Computer -eq $comp
+        $script:res = [pscustomobject]@{
+            Room = $script:Room
+            Computer = $comp
+            OT = $ot
+            Query = 'Get-BIOS'
+            Settings = $tmpobj | select * | out-string
+            Attention = "Potential Misconfigurations: $($tmp:mismatch | select Setting, Current, Desired | 
+             out-string)"
+             Serial = $tag
+             Status = "Corrections needed."
+         }
+      }
+      
+      $script:getBIOS += $script:res    
+}
+
+function Set-BIOS {
+    param([string]$comp)
+
+    Get-BIOS($comp)  
+
+    $script:task = 'Set-BIOS'   
+
+    $working = $script:mismatch | where-object Computer -match $comp
+    $working = $working | where-object Setting -ne "EmbSataRaid"
+
+    foreach($line in $working) {
+        $tmp = $line.current
+        $line | add-member -membertype NoteProperty -name 'Previous' -value $tmp -erroraction silentlycontinue
+    }
+
+    $working = $working | select-object -excludeproperty Current
+
+    if($working -eq $null) {
+        $script:res = [pscustomobject]@{
+            Computer = $comp
+            Setting = "All settings correctly configured"
+            Previous = ""
+            New = ""
+            Status = "Successful. BIOS Verified."
+        }
+        $script:validation.add($script:res) > $null
+        Write-Color "`tBIOS Settings"," Verified" -color blue,green
+    } 
+    
+    else {
+        foreach($line in $working) {
+            $searchstr = "*" + $line.Setting + "*"
+
+            foreach($set in $settingscat) {
+                if($set -like $searchstr) {
+                    $line | add-member -membertype NoteProperty -name 'Category' -value $set -erroraction silentlycontinue > $null
+                }
+            }
+        }
+        
+        $tmpval2 = Invoke-Command -session $script:session -scriptblock {
+            foreach($line in $using:working){
+
+                $setPath = "DellSmbios:\" + $line.category
+                $setVal = $line.desired
+                set-item -path $setPath -value $setval -password $using:invkPass -erroraction silentlycontinue
+                $tmpVar = get-childitem -path $setpath | select-object CurrentValue -erroraction silentlycontinue
+                $line | add-member -membertype NoteProperty -name 'New' -value $tmpVar.currentvalue -erroraction silentlycontinue > $null
+                $tmpval = [System.Collections.ArrayList]@()
+                $tmpval.add($line) > $null
+            }
+            $tmpval
+            remove-module -name "DellBiosProvider"
+        } | select-object Computer,Setting,Previous,New,Status
+
+        foreach($line in $tmpval2.Syncroot) {
+            if($line.previous -eq $line.new -and $line.setting -ne "All settings correctly configured") {
+                $script:failFlag = $true
+                $tmpset = $line.setting
+                $line.status = "Failed to set ${$tmpset}!"
+            }
+            else {
+                $line.status = "Successfully updated!"
+            }
+
+            $script:validation.add($line) > $null
+        }
+        if($script:failflag -eq $true) {
+            write-color "`tWarning! ","`nAll settings not corrected! Please check your BIOS password and try again." -color red,yellow
+        }
+        else {
+            write-color "`tBIOS Settings ","Corrected." -color blue,yellow
+        }
+    }
+}
+
+#Main program =================================================================================================================
+
+$script:psver = $psversiontable.PSVersion
+
+if (!($script:psver.Major -gt 6)) {
+
+    Write-color "Warning! ","This script was written for PowerShell version 7 or greater." -color red,yellow
+    Write-Color "You have version ","${script:psver}" -color yellow,green
+    Write-Color "Exporting to CSV may not behave as expected. " -color yellow
+    Write-Color "For the best experience, please make sure you run this script in Powershell version 7.0 or greater. " -color cyan
+}
+$script:password = read-host -prompt 'Enter BIOS password' -asSecureString
+      $script:invkPass = convertfrom-securestring -securestring $password -asplaintext
+
+Get-Mode
+if($script:logging -eq 'Y') {
+      start-log
+}
+$script:task = 'Set-BIOS'
+Check-Connection
+
+if(($script:getbios -ne $null)) {
+    $script:ConfirmWrite = Read-Host -prompt "Would you like to save your results to file? [Y]es or any key for No"
+    Write-Host $script:ConfirmWrite
+
+    if($script:ConfirmWrite -eq 'Y') {
+        get-filename
+        write-excel
+    }
+}
+
+if($script:ConfirmWrite -eq 'Y') {
+    Write-Color "Report written to ","${script:CheckPath}" -color blue,cyan
+}
+
+if($script:Logging -eq 'Y') {
+    Stop-Log
+}
+
+Write-Color "Goodbye." -color magenta
