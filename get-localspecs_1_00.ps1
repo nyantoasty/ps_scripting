@@ -560,6 +560,8 @@ function get-filename {
 function write-excel {
 
       $script:xlpkg = $script:trash       | export-excel -path $script:checkpath    -worksheetname 'TRASH'        -tablename 'T_T'              -autosize -passthru 
+      $script:xlpkg = $script:SettingsBIOS | Export-excel -excelpackage $xlpkg       -worksheetname 'BIOS_Settings' -tablename 'BIOS_Settings'        -autosize -passthru
+
       $script:xlpkg = $script:Basics      | Export-excel -excelpackage $xlpkg       -worksheetname 'Basics'       -tablename 'Get_Basic'        -autosize -passthru 
       $script:xlpkg = $script:Battery     | Export-excel -excelpackage $xlpkg       -worksheetname 'Battery'      -tablename 'Get_Battery'      -autosize -passthru 
       $script:xlpkg = $script:OS          | Export-excel -excelpackage $xlpkg       -worksheetname 'OS'           -tablename 'Get_OS'           -autosize -passthru 
@@ -573,11 +575,15 @@ function write-excel {
       
 
       $script:xlpkg.workbook.worksheets.delete('TRASH')
-      set-excelrange    -worksheet $script:xlpkg.Health -Range "E:E" -wraptext
-      set-excelrange    -worksheet $script:xlpkg.Health -Range "G:G" -wraptext
-      set-excelrange    -worksheet $script:xlpkg.Health -Range "H:H" -wraptext
-      set-excelrange    -worksheet $script:xlpkg.OS -Range "H:H" -wraptext
-      set-excelrange    -worksheet $script:xlpkg.OS -Range "Q:Q" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.GPU           -Range "G:G" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.Health        -Range "E:E" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.Health        -Range "F:F" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.Health        -Range "G:G" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.Health        -Range "H:H" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.Health        -Range "I:I" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.OS            -Range "H:H" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.OS            -Range "Q:Q" -wraptext
+      set-excelrange    -worksheet $script:xlpkg.BIOS_Settings -range "f:f" -wraptext
       close-excelpackage $script:xlpkg    
 }
 
@@ -1447,49 +1453,184 @@ function Check-BIOS {
 
 
 }
+function BIOS-Settings {
+      param([string]$comp)
+
+      $session = new-pssession $comp
+      $type = invoke-command -session $session -scriptblock {get-computerinfo} | select cschassisskunumber
+
+      #NOTE: These configurations are based off of current documentation; please contact k.ainsworth@shsu.edu if there are any mistakes
+
+      if($type.cschassisskunumber -like "Desktop"){
+
+            $SettingsCat = ("SecureBoot\SecureBootMode",
+                  "SecureBoot\SecureBoot",
+                  "Security\PasswordLock",
+                  "Security\IsAdminPasswordSet",
+                  "TPMSecurity\TPMActivation",
+                  "TPMSecurity\TPMSecurity",
+                  "PowerManagement\AutoOn",
+                  "PowerManagement\AutoOnHr",
+                  "PowerManagement\AutoOnMn",
+                  "PowerManagement\ACPwrRcvry",
+                  "SystemConfiguration\EmbNic1",
+                  "SystemConfiguration\UefiNwStack",
+                  "SystemConfiguration\EmbSataRaid")
+
+            $DesiredSettings = @{SecureBootMode = 'DeployedMode';
+                  SecureBoot='Enabled';
+                  PasswordLock='Disabled';
+                  IsAdminPasswordSet='True';
+                  TPMActivation='Enabled';
+                  TPMSecurity='Enabled';
+                  AutoOn='Everyday';
+                  AutoOnHr='23';
+                  AutoOnMn='0';
+                  ACPwrRcvry='On';
+                  EmbNic1='EnabledPxe';
+                  UefiNwStack='Enabled';
+                  EmbSataRaid='Ahci'}
+      }
+
+      else {
+
+            $SettingsCat =("SecureBoot\SecureBootMode",
+                  "SecureBoot\Secureboot",
+                  "Security\PasswordLock",
+                  "Security\IsAdminPasswordSet",
+                  "TPMSecurity\TpmSecurity",
+                  "SystemConfiguration\EmbNic1",
+                  "SystemConfiguration\UefiNwStack",
+                  "SystemConfiguration\EmbSataRaid")
+
+            $DesiredSettings = @{SecureBootMode='DeployedMode';
+                  SecureBoot='Enabled';
+                  PasswordLock='Disabled';
+                  IsAdminPasswordSet='True';
+                  TPMSecurity='Enabled';
+                  EmbNic1='EnabledPxe';
+                  UefiNwStack='Enabled';
+                  EmbSataRaid='Ahci'
+                  }
+      }
+      $tmpBIOS = @()
+      
+      $localsettings = invoke-command -session $session -scriptblock {
+            if(!(get-installedmodule -name 'dellbiosprovider' -ea ignore)){
+                  set-psrepository -name psgallery -installationpolicy trusted
+                  install-module -name dellbiosprovider
+                  import-module -name dellbiosprovider
+            }
+            else {
+                  import-module -name dellbiosprovider
+            }
+            $script:current = @()
+            foreach($s in $using:settingscat) {
+                  $script:res = get-childitem -path "Dellsmbios:\$($s)" -ea ignore| select-object PSComputerName,Attribute,CurrentValue
+                  $script:current += $script:res
+            }
+            remove-module -name "DellBiosProvider"
+            $script:current } | select-object pscomputername,attribute,currentvalue
+      $OT = (get-ciminstance -computername $comp win32_systemenclosure).smbiosassettag
+      $info = invoke-command -session $session -scriptblock {get-computerinfo | select-object 'BiosSeralNumber'}             
+
+      foreach($att in $localsettings) {
+            $script:res = [pscustomobject]@{
+                  Computer = $att.PSComputerName
+                  Setting = $att.attribute
+                  Current = $att.currentvalue
+                  Desired = $desiredsettings[$att.attribute]
+            }
+            $tmpBIOS += $script:res
+      }
+
+      $mismatch = @()
+      foreach($att in $tmpbios) {
+            if($att.current -ne $att.desired) {
+                  $script:res = [pscustomobject]@{
+                        Setting = $att.setting
+                        Current = $att.current
+                        Desired = $att.desired
+                  }
+                  $mismatch += $script:res
+            }
+      }
+
+      $tmpobj = new-object system.management.automation.psobject
+
+      foreach($f in $tmpbios) {
+            $check = "{0, -15} >> {1,15}" -f $f.current, $f.desired
+            # $($f.current), $($f.desired)"
+            $name = "{0,-20}" -f $f.setting
+            $tmpobj | add-member -membertype noteproperty -name $name -value $check | out-string
+      }
+
+      $tag = $info.biosseralnumber
+
+      $script:res = [pscustomobject]@{
+            Room = $script:Room
+            Host = $comp
+            OT = $ot
+            Query = 'Settings-BIOS'
+            Settings = $tmpobj | select * | out-string
+            Attention = "Potential Misconfigurations: $($mismatch | select * |
+             out-string)"
+             Serial = $tag
+      }
+      
+      $script:healthres = [pscustomobject]@{
+            Room = $script:Room
+            Host = $comp
+            OT = $ot
+            Query = 'Settings-BIOS'
+            Component = 'BIOS Settings'
+            Health = $tmpobj | out-string
+            Name = "Device Type: $($type.cschassisskunumber)"
+            Detail = "Potential Misconfigurations: $($mismatch | select * |
+             out-string)"
+            SerialMac = $res.serial
+
+      }
+      $script:settingsbios += $script:res
+      $script:health += $script:healthres    
+}
 
 function run-stats {
       param(
   [string]$comp)
 
-  $script:Task = 'Get-Battery'
-  get-battery -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
-
-  $script:Task = 'Get-Basic'
-  Get-Basic -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
-
-  $script:Task = 'Get-BIOS'
-  get-BIOS -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
-
-  $script:Task = 'Get-CPU'
-  get-CPU -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
-
-  $script:Task = 'Get-GPU'
-  get-GPU -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
+  $script:Task = "Get-ADinfo"
+  Get-ADinfo -comp $comp    
 
   $script:Task = 'Get-OS'
   get-OS -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
 
-  $script:Task = 'Get-Network'
-  get-Network -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
+  $script:Task = 'Get-Battery'
+  get-battery -comp $comp
+
+  $script:Task = 'Get-BIOS'
+  get-BIOS -comp $comp
+
+  $script:Task = 'BIOS-Settings'
+  BIOS-Settings -comp $comp
+
+  $script:Task = 'Get-CPU'
+  get-CPU -comp $comp
 
   $script:Task = 'Get-RAM'
   get-RAM -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
+
+  $script:Task = 'Get-GPU'
+  get-GPU -comp $comp
+
+  $script:Task = 'Get-Network'
+  get-Network -comp $comp
 
   $script:Task = 'Get-Space'
   get-space -comp $comp
-  Write-Color "`t${script:Task}" -color darkgray
 
-  Write-Color "`tCreating Health Report" -color darkgray
-  write-host ""
+  $script:Task = 'Get-Basic'
+  Get-Basic -comp $comp
 
   $script:Task = 'Run-All'
 
@@ -1503,6 +1644,8 @@ function run-stats {
   $all = @(
     $trash  
     $script:Health
+    $script:settingsbios
+    $script:ad_info
     $script:Basics
     $script:Battery
     $script:OS
@@ -1515,6 +1658,7 @@ function run-stats {
     
     )
   $script:allstats += $all
+  $script:results = $script:allstats
     
   return $script:allstats | out-null
 }
