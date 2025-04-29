@@ -106,9 +106,15 @@
 
     .NOTES
         Created by: KJA
-        Modified: 2024-07-17
+        Modified: 2025-04-16
 
     .CHANGELOG
+
+    2025
+        4/16
+            - Adding ability to check root\ccm\clientsdk for applicationp packages; this will use both the OS and SCCM to check for programs and will help point out inconsistencies
+
+    2024
 
         7/31
             - Continuing adding separate functions for stats + adding hashtables for identifying specific numeric codes
@@ -629,7 +635,7 @@ $Directory = 'C:\Transcripts' # File path to save logs/transcripts
 $dname = $null # stores distinguished name for get-ou search
 $Err = $null #stores error message
 $Filename = $null # Generated name of Transcript
-$host = $null # Name of active node
+#$host = $null # Name of active node
 $Hostfile = $null # List of node names
 $inadflag = $null # shows if $host name was found in AD
 $job = # stores info from running invoke-command as a job
@@ -645,6 +651,7 @@ $Node = $null # Computer Name
 $NodeList = @() # Multiple Computer Names
 $nsforward = $null # holds information for nslookup
 $Obj = @() # Working ps object; added to $Results
+$obj2 = @() # working object for adding additional info in get-software (ccm applications)
 $oldname = $null # originally listed host name from hostfile
 $os = $null # Stores OS info pulled from AD
 $osdrive = $null # stores drive info for bootdisk
@@ -714,6 +721,7 @@ function Select-Task {
         '2' {
             
             Write-Color "You have selected ","2:"," Get installed software"," from a computer/computers" -Color Green,Yellow,Blue,Green
+            Write-Color "If the targeted machines throw"," WS-Management"," errors, rebooting them may fix the problem." -color cyan,yellow,cyan
             $script:Task = 'Get-Software'
             return
         }
@@ -1268,7 +1276,7 @@ function Skip-Bad {
                 Host = $bad
                 ProductName = 'NA'
                 ProductVersion = 'NA'
-                Status = $status
+                Status = "Failed to connect, $($status)"
             }
             $script:Results += $script:Res
         }
@@ -1805,7 +1813,7 @@ function Check-Connection {
             if ($script:Continue -eq 'D') {
                 Write-Color "Displaying current results" -Color Cyan
                 Write-COlor "Results will appear in another window; closing the window will not affect this session." -color blue
-                $script:Results | out-gridview
+                $script:Results | out-gridview -passthru
                 $script:Continue = Read-Host -Prompt "[A]dd new node, [S]top"
             }
             if ($script:Continue -eq 'C') {
@@ -1988,6 +1996,8 @@ function Get-Software {
         $status = "Successful"
     }
 
+    $script:cimsession = new-cimsession -computername $comp
+
     if ($script:SoftwareChoice -eq 'A') {
 
         $script:Obj = Get-CimInstance -Namespace root/cimv2/sms -ClassName SMS_InstalledSoftware -ComputerName $comp | Select-Object -Property ProductName, ProductVersion
@@ -2001,16 +2011,45 @@ function Get-Software {
                 Room = $script:Room
                 Host = $cname
                 ProductName = $test.ProductName
-                ProductVersion = $test.ProductVersion
-                Status = $status
+                Namespace = "root\cimv2\sms"
+                Status = "Installed, $($status)"
             }
             $script:Results += $script:Res
         }
+         $script:obj2 = invoke-command -computername $comp -scriptblock {Get-wmiobject -Namespace "ROOT\ccm\clientsdk" -ClassName "CCM_Application" | where-object {$_.installstate -eq "Installed"} | select-object -property Name, InstallState}
+
+            if(!($script:Obj2 -eq $null)) {
+
+                foreach ($ob in $script:Obj2) {
+        
+                    $script:Res = [PSCustomObject]@{
+                        Room = $script:Room
+                        Host = $comp
+                        ProductName = $ob.Name
+                        Namespace = "root\ccm\clientsdk"
+                        Status = $ob.installstate+", "+$status
+                    }
+                    $script:Results += $script:Res
+                }
+            }
+            else {
+
+                $script:Res = [PSCustomObject]@{
+                    Room = $script:Room
+                    Host = $comp
+                    ProductName = "$($product), ' NA')"
+                    Namespace = "root\ccm\clientsdk"
+                    Status = "Not Found"
+                }
+                $script:Results += $script:Res
+            }
+        
     }
 
     else {
 
         foreach ($product in $script:SoftwareList) {
+            $tmpProd = $product
             $product = -join('*',$product,'*')
             $script:Obj = Get-CimInstance -Namespace root/cimv2/sms -ClassName SMS_InstalledSoftware -ComputerName $comp | Where-Object {$_.ProductName -like $product} | Select-Object -Property ProductName, ProductVersion
 
@@ -2022,8 +2061,8 @@ function Get-Software {
                         Room = $script:Room
                         Host = $comp
                         ProductName = $ob.ProductName
-                        ProductVersion = $ob.ProductVersion
-                        Status = $status
+                        Namespace = "root\cimv2\sms"
+                        Status = "Installed, $($status)"
                     }
                     $script:Results += $script:Res
                 }
@@ -2033,9 +2072,37 @@ function Get-Software {
                 $script:Res = [PSCustomObject]@{
                     Room = $script:Room
                     Host = $comp
-                    ProductName = -join($product, ' NA')
-                    ProductVersion = 'Not Installed'
-                    Status = $status
+                    ProductName = $tmpProd
+                    Namespace = "root\cimv2\sms"
+                    Status = "Not Found"
+                }
+                $script:Results += $script:Res
+            }
+
+        $script:obj2 = invoke-command -computername $comp -scriptblock {Get-wmiobject -Namespace "ROOT\ccm\clientsdk" -ClassName "CCM_Application" | where-object {$_.name -like $using:Product}} | select name, installstate
+
+            if(!($script:Obj2 -eq $null)) {
+
+                foreach ($ob in $script:Obj2) {
+        
+                    $script:Res = [PSCustomObject]@{
+                        Room = $script:Room
+                        Host = $comp
+                        ProductName = $ob.Name
+                        Namespace = "root\ccm\clientsdk"
+                        Status = $ob.installstate+", "+$status
+                    }
+                    $script:Results += $script:Res
+                }
+            }
+            else {
+
+                $script:Res = [PSCustomObject]@{
+                    Room = $script:Room
+                    Host = $comp
+                    ProductName = $tmpProd
+                    Namespace = "root\ccm\clientsdk"
+                    Status = "Not Found"
                 }
                 $script:Results += $script:Res
             }
